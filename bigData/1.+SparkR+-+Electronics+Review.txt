@@ -1,0 +1,97 @@
+spark_path <- '/usr/local/spark'
+
+if (nchar(Sys.getenv("SPARK_HOME")) < 1) {
+  Sys.setenv(SPARK_HOME = spark_path)
+}
+
+library(SparkR, lib.loc = c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib")))
+
+sparkR.session(master = "yarn", sparkConfig = list(spark.driver.memory = "1g"))
+
+
+data_electronics <- read.json("hdfs:///common_folder/amazon_reviews/original_dataset.json")
+
+head(data_electronics)
+nrow(data_electronics)
+ncol(data_electronics)
+str(data_electronics)
+printSchema(data_electronics)
+
+df <- collect(describe(data_electronics))
+df
+
+hist <- histogram(data_electronics, data_electronics$overall, nbins = 12)
+
+library(ggplot2)
+
+plot <- ggplot(hist, aes(x = centroids, y = counts)) +
+  geom_bar(stat = "identity") +
+  xlab("overall rating") + ylab("Frequency")
+# Use this link to understand the attribute 'geom_bar'
+# https://www.rdocumentation.org/packages/ggplot2/versions/1.0.1/topics/geom_bar
+
+plot
+
+# Select certain rows
+# Syntax: select(df, “col”, ...)    OR    select(df, df$col)
+head(select(data_electronics, data_electronics$summary))
+
+# Apply a filter
+# Syntax:  filter(DataFrame, condition)
+head(filter(data_electronics, data_electronics$overall <= 4))
+nrow(filter(data_electronics, data_electronics$overall <= 4))
+
+# GroupBy
+# Syntax:  groupBy(DataFrame, “columnName”)
+head(summarize(groupBy(data_electronics, data_electronics$overall),
+               count = n(data_electronics$overall)))
+
+#GroupBy + Sort
+overall_counts <- summarize(groupBy(data_electronics, data_electronics$overall),
+                            count = n(data_electronics$overall))
+head(arrange(overall_counts, desc(overall_counts$count)))
+
+# For using SQL, you need to create a temporary view
+# Use this link to understand the syntax
+# https://spark.apache.org/docs/preview/sql-programming-guide.html
+createOrReplaceTempView(data_electronics, "data_elec_tbl")
+
+
+# Before executing any hive-sql query from RStudio, you need to add a jar file in RStudio 
+sql("ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar")
+
+# Now, find the reviews which have a '5' rating
+data_rated_5 <- SparkR::sql("SELECT * FROM data_elec_tbl WHERE overall = 5")
+head(data_rated_5)
+nrow(data_rated_5)
+
+# First, create a length variable. This can be done in SQL very easily
+data_withLength <- SparkR::sql("SELECT helpful, overall, reviewText, reviewTime, summary, asin, LENGTH(reviewText) AS reviewLength FROM data_elec_tbl")
+createOrReplaceTempView(data_withLength, "data_elec_tbl")
+
+# Binning into different lengths of reviewtext
+bins <- sql("SELECT reviewLength, reviewText, asin, overall, helpful, \
+                   CASE  WHEN reviewLength <= 1000  THEN 1\
+                   WHEN (reviewLength > 1000  and reviewLength <= 2000) THEN 2\
+                   WHEN (reviewLength > 2000 and reviewLength <= 3000) THEN 3\
+                   WHEN (reviewLength > 3000 and reviewLength <= 4000) THEN 4\
+                   ELSE 5 END  as bin_number FROM data_elec_tbl")
+
+head(select(bins, c(bins$reviewLength, bins$bin_number)))
+
+
+# First create a dataframe for the model
+data_electronics_formodel <- SparkR::sql("SELECT reviewLength, overall, helpful[0]/helpful[1] AS helpful_ratio 
+FROM data_elec_tbl 
+WHERE helpful[1] >= 10")
+
+head(data_electronics_formodel)
+
+# Build model
+model_linear <- SparkR::glm(helpful_ratio ~ reviewLength, data = data_electronics_formodel, family = "gaussian")
+
+# Create summary of model
+summary_model_linear <- summary(model_linear)
+summary_model_linear
+
+sparkR.stop()

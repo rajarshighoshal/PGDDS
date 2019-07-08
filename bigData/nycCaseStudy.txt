@@ -1,0 +1,339 @@
+## NYC Parking Tickets: An Exploratory Analysis
+
+## Objectives ---  
+# New York City is a thriving metropolis and one of the biggest problems that its citizens face is parking. 
+# The classic combination of a huge number of cars and cramped geography is the exact recipe that leads to a 
+# huge number of parking tickets.
+
+# In an attempt to scientifically analyse this phenomenon, the NYC Police Department has collected data for 
+# parking tickets. For the scope of this analysis, we wish to analyse the parking tickets over the year 2017.
+
+# NOTE:There are no specific points reserved for recommendations on how to reduce the number of parking tickets.
+
+## Purpose ---
+# The purpose of this case study is to conduct an exploratory data analysis  to understand the data
+
+## Accessing the dataset ---
+# The data for this case study has been placed in HDFS at the following path:-
+# '/common_folder/nyc_parking/Parking_Violations_Issued_-_Fiscal_Year_2017.csv'
+
+## Load SparkR
+spark_path <- '/usr/local/spark'
+if (nchar(Sys.getenv("SPARK_HOME")) < 1) {
+  Sys.setenv(SPARK_HOME = spark_path)
+}
+library(SparkR, lib.loc = c(file.path(Sys.getenv("SPARK_HOME"), "R", "lib")))
+
+## Initialise the sparkR session
+sparkR.session(master = "yarn-client", sparkConfig = list(spark.driver.memory = "1g"))
+
+library(stringr)
+library(ggplot2)
+library(ggthemes)
+
+
+######## UNDERSTANDING THE DATA #########
+
+# Reading data
+nycparking <- read.df("hdfs:///common_folder/nyc_parking/Parking_Violations_Issued_-_Fiscal_Year_2017.csv", source = "csv", 
+                      inferSchema = "true", header = "true")
+
+# Examining data
+head(nycparking)
+nrow(nycparking) # 10803028
+ncol(nycparking) # 10
+str(nycparking)
+
+
+# Details of the 10 variables are as follows:- 
+# Summons Number: num, Plate ID: chr, Registration State: chr, Issue Date: POSIXct, Violation Code: int, 
+# Vehicle Body Type: chr, Vehicle Make: chr, Violation Precinct: int, Issuer Precinct: int, Violation Time: chr
+
+printSchema(nycparking)
+
+# Summarization of data
+collect(describe(nycparking))
+
+
+
+######## CLEANING THE DATA #########
+
+#Renaming the columns of the Spark Dataframe
+colnames(nycparking)<- str_replace_all(colnames(nycparking), pattern=" ", replacement = "_")
+
+# ISSUE DATE RANGE:-
+select(nycparking, year(nycparking$Issue_Date))
+issuedate_range <- summarize(groupBy(nycparking, year(nycparking$Issue_Date)),
+                             count = n(year(nycparking$Issue_Date)))
+head(arrange(issuedate_range, desc(issuedate_range$count)))
+
+# As we can observe, other than 2017 records are also present in the dataset. Hence need to remove those entries
+# Filtering rows which are of 2017. We are interested in 2017 data only for our analysis
+nycparking<- filter(nycparking, year(nycparking$Issue_Date) == '2017')
+head(nycparking)
+nrow(nycparking) # 5431918
+
+#converting Issue date to similar format
+nycparking$Issue_Date <- to_date(nycparking$Issue_Date, 'MM/dd/yyyy')
+head(nycparking)
+
+# Removing duplicate rows
+dropna(nycparking, how = c("any", "all"), minNonNulls = NULL, cols = NULL)
+nrow(nycparking) # 5431918 i.e. No duplicates were found
+
+
+## Examine the data
+
+# 1. Find the total number of tickets for the year 2017
+
+numberoftickets <- count(distinct(select(nycparking, nycparking$Summons_Number)))
+numberoftickets #5431918
+
+# This shows that Summons number is the unique ID for each records.
+
+# 2. Find out the number of unique states from where the cars that got parking tickets came from
+
+uniquestates <- count(distinct(select(nycparking, nycparking$Registration_State)))
+uniquestates # There are total 65 states.
+
+# Let's see, top 6 states where maximum tickets are issued in 2017
+
+
+stateticket_count <- summarize(groupBy(nycparking, nycparking$Registration_State),
+                               count = n(nycparking$Summons_Number))
+head(arrange(stateticket_count, desc(stateticket_count$count)))
+
+#  Registration State      count                                                    
+#                 NY      4273951
+#                 NJ      475825
+#                 PA      140286
+#                 CT      70403
+#                 FL      69468
+#                 IN      45525
+## this shows that maximum tickets are registered in NY state
+
+## Replacing registration state '99' with NY as per the problem statement
+nycparking$Registration_State <- regexp_replace(nycparking$Registration_State, pattern="99", replacement="NY")
+
+#Hence, calculating the number of unique states again
+uniquestates <- count(distinct(select(nycparking, nycparking$Registration_State)))
+uniquestates # There are total 64 states. i.e., State- "99" has been replaced with "NY"
+
+#### looking into the other variables one by one:
+#  Plate ID: Find out the number of unique Plate ID to get an idea of number of cars which were issued parking tickets
+
+numberofcars <- count(distinct(select(nycparking, nycparking$Plate_ID)))
+numberofcars # There are total 1974356 cars.
+
+#  Issue Date: Let's find out in which month, maximum parking tickets were issued in 2017
+
+ticketissue_month <- summarize(groupBy(nycparking, month(nycparking$Issue_Date)),
+                               count = n(nycparking$Summons_Number))
+head(arrange(ticketissue_month, desc(ticketissue_month$count)))
+
+# So the top 6 months are as follows:
+# month(Issue_Date)   count                                                     
+# 1                 5 1020244
+# 2                 3  964737
+# 3                 4  888402
+# 4                 1  877365
+# 5                 6  852187
+# 6                 2  826967
+
+
+# Violation Code:
+Violationcode_type <- summarize(groupBy(nycparking, nycparking$Violation_Code),
+                                count = n(nycparking$Summons_Number))
+head(arrange(Violationcode_type, desc(Violationcode_type$count)))
+
+
+# Vehicle Body Type: 
+Vehiclebody_type <- summarize(groupBy(nycparking, nycparking$Vehicle_Body_Type),
+                              count = n(nycparking$Summons_Number))
+head(arrange(Vehiclebody_type, desc(Vehiclebody_type$count)))
+
+
+#  Vehicle Make: 
+Vehiclemake_type <- summarize(groupBy(nycparking, nycparking$Vehicle_Make),
+                              count = n(nycparking$Summons_Number))
+head(arrange(Vehiclemake_type, desc(Vehiclemake_type$count)))
+
+# Violation Precinct: Note to Delete rows with 0 as entry
+
+Viol_Precinct <- summarize(groupBy(nycparking, nycparking$Violation_Precinct),
+                           count = n(nycparking$Summons_Number))
+head(arrange(Viol_Precinct, desc(Viol_Precinct$count)))
+
+#  Issuer Precinct: Note to Delete rows with 0 as entry
+
+Issuer_Precinct <- summarize(groupBy(nycparking, nycparking$Issuer_Precinct),
+                             count = n(nycparking$Summons_Number))
+head(arrange(Issuer_Precinct, desc(Issuer_Precinct$count)))
+
+
+## PENDING
+
+# Violation Time: chr: to convert to timestamp
+
+str(nycparking)
+nycparking$M <- "M"
+nycparking$Violation_Time <- concat(nycparking$Violation_Time, nycparking$M)
+
+nycparking$Violation_Time <- to_timestamp(nycparking$Violation_Time, format = "hhmma")
+
+##################Aggregation Task ################# Priyanka
+
+##1.How often does each violation code occur? Display the frequency of the top five violation codes.
+
+freq_violation_code <- summarize(groupBy(nycparking, nycparking$Violation_Code),
+                                 freq = n(nycparking$Violation_Code))
+
+violation_code_top5 <- data.frame(head(arrange(freq_violation_code, desc(freq_violation_code$freq)), 5))
+head(violation_code_top5)
+#  Violation Code   freq
+#1             21 768087
+#2             36 662765
+#3             38 542079
+#4             14 476664
+#5             20 319646
+
+ggplot(violation_code_top5,aes(x = as.character(Violation_Code), y =freq ))+ geom_bar(color="black",stat = "identity")+
+  labs(x = "Violation Code", y= "Count", title = "Frequency of Top Five Violation Codes ") +
+  geom_text(aes(label=freq),vjust=-0.3)+
+  theme_stata()
+
+#--------------------------------------------------------------------------------------
+
+##2.How often does each 'vehicle body type' get a parking ticket? How about the 'vehicle make'? 
+
+#Vehicle Body Type
+freq_vehicle_body_type <- summarize(groupBy(nycparking, nycparking$Vehicle_Body_Type),
+                                    freq = n(nycparking$Vehicle_Body_Type))
+
+vehicle_body_type_top5 <- data.frame(head(arrange(freq_vehicle_body_type, desc(freq_vehicle_body_type$freq)), 5))
+head(vehicle_body_type_top5)
+# Vehicle.Body.Type    freq
+#1              SUBN 1883954
+#2              4DSD 1547312
+#3               VAN  724029
+#4              DELV  358984
+#5               SDN  194197
+
+ggplot(vehicle_body_type_top5,aes(x = Vehicle_Body_Type, y =freq ))+ geom_bar(color="black",stat = "identity")+
+  labs(x = "Vehicle Body Type", y= "Count", title = "Frequency of Top Five Vehicle Body Type ") +
+  geom_text(aes(label=freq),vjust=-0.3)+
+  scale_fill_brewer(palette = "Pastel1")+
+  theme_stata()
+
+
+#Vehicle Make
+freq_vehicle_make <- summarize(groupBy(nycparking, nycparking$Vehicle_Make),
+                               freq = n(nycparking$Vehicle_Make))
+
+vehicle_make_top5 <- data.frame(head(arrange(freq_vehicle_make, desc(freq_vehicle_make$freq)), 5))
+head(vehicle_make_top5)
+#  Vehicle.Make   freq
+#1         FORD 636844
+#2        TOYOT 605291
+#3        HONDA 538884
+#4        NISSA 462017
+#5        CHEVR 356032
+
+ggplot(vehicle_make_top5,aes(x = Vehicle_Make, y =freq ))+ geom_bar(color="black",stat = "identity")+
+  labs(x = "Vehicle Make", y= "Count", title = "Frequency of Top Five Vehicle Make ") +
+  geom_text(aes(label=freq),vjust=-0.3)+
+  scale_fill_brewer(palette = "Pastel1")+
+  theme_stata()
+
+#-------------------------------------------------------------------------------------
+
+## Pre-requisites for the next questions--
+
+# Violation Precinct: :Delete rows with 0 as entry
+nycparking <- filter(nycparking, (nycparking$Violation_Precinct) != 0)
+nrow(nycparking) #4506322  i.e., 925596 rows were removed
+
+#  Issuer Precinct: Delete rows with 0 as entry
+nycparking <- filter(nycparking, (nycparking$Issuer_Precinct) != 0)
+nrow(nycparking) #4350159  i.e., 156163 rows were removed
+
+##3.A precinct is a police station that has a certain zone of the city under its command.
+#Find the (5 highest) frequency of tickets for each of the following:
+
+##3.1'Violation Precinct' (this is the precinct of the zone where the violation occurred). 
+#Using this, can you make any insights for parking violations in any specific areas of the city?
+
+#Before executing any hive-sql query from RStudio, you need to add a jar file in RStudio 
+sql("ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar")
+
+#Creating a Temporary View for the SQL Query
+createOrReplaceTempView(nycparking, "nycparking_tbl")
+
+fre_Viol_Prec <- SparkR::sql("SELECT Violation_Precinct,count(Violation_Precinct) AS Frequency
+                             FROM nycparking_tbl
+                             GROUP BY Violation_Precinct")
+head(arrange(fre_Viol_Prec, desc(fre_Viol_Prec$Frequency)))
+
+#  Violation_Precinct Frequency                                                  
+#1          19         273405
+#2          14         203361
+#3           1         170263
+#4          18         144964
+#5         114         147444
+#6          13         124276  
+
+head(arrange(fre_Viol_Prec, asc(fre_Viol_Prec$Frequency))) #Violation Precinct with min freq
+# Violation_Precinct Frequency                                                  
+#        183            1
+#        126            1
+#        673            1
+#        918            1
+#        613            1
+#        806            1
+
+##3.2'Issuer Precinct' (this is the precinct that issued the ticket)
+#Here you would have noticed that the dataframe has 'Violating Precinct' or 'Issuing Precinct' as '0'. 
+#These are the erroneous entries. Hence, provide the record for five correct precincts. (Hint: Print top six entries after sorting)
+
+fre_Issuer_Prec <- SparkR::sql("SELECT Issuer_Precinct,count(Issuer_Precinct) AS Frequency
+                               FROM nycparking_tbl
+                               GROUP BY Issuer_Precinct")
+head(arrange(fre_Issuer_Prec, desc(fre_Issuer_Prec$Frequency)))
+
+#  Issuer_Precinct Frequency                                                     
+#1        19        266921
+#2        14        200429
+#3         1        168494
+#4        18        162973
+#5       114        143994
+#6        13        122455
+
+#-------------------------------------------------------------------------------------
+
+##4. Find the violation code frequency across three precincts which have issued the most number of tickets - 
+#do these precinct zones have an exceptionally high frequency of certain violation codes? 
+#Are these codes common across precincts? 
+
+fre_Viol_Code <- SparkR::sql("SELECT Issuer_Precinct, Violation_Code ,count(Issuer_Precinct) AS Frequency
+                             FROM nycparking_tbl WHERE Issuer_Precinct IN (1, 19, 14)
+                             GROUP BY Issuer_Precinct, Violation_Code")
+head(arrange(fre_Viol_Code, desc(fre_Viol_Code$Frequency)))
+
+#   Issuer_Precinct   Violation_Code    Frequency                                   
+#1          19              46            48410
+#2          14              14            45024
+#3           1              14            38309
+#4          19              38            36386
+#5          19              37            36056
+#6          14              69            30464
+
+#Issuer_Precinct- 19 has an exceptionally high frequency of Violations (48410+36386+36056= 120852)
+#Violation Code- 14 is common among 2 of the Issuer Precinct having the highest freuncy of Violation
+
+#------------------------------------------------------------------------------------
+
+##5.Find out the properties of parking violations across different times of the day:
+
+##5A. Find a way to deal with missing values, if any.
+null_value <- SparkR::sql("SELECT count(*) as count_of_null from nycparking_tbl WHERE isnull(Violation_Time)")
+head(null_value) #0 i.e., No Null Values exist for the column: Violation_Time
